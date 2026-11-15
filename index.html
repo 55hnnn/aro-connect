@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'none'; form-action 'none'; base-uri 'none'">
+<meta name="referrer" content="no-referrer">
+<title>아로 계정 연결</title>
+<link rel="stylesheet" href="connect.css">
+</head>
+<body>
+<main>
+  <h1 id="title">계정 연결</h1>
+  <p id="intro">입력한 값은 이 휴대폰에서 암호화되어, 비서가 도는 PC만 열 수 있게 전달돼요.</p>
+  <form id="form" autocomplete="off" novalidate hidden>
+    <div id="fields"></div>
+    <p id="note" class="note"></p>
+    <p id="error" class="error" role="alert" hidden></p>
+    <button id="send" type="submit">연결하기</button>
+  </form>
+  <p id="problem" class="error" hidden></p>
+</main>
+<script src="connect.js"></script>
+</body>
+</html>
