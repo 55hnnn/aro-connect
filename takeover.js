@@ -195,6 +195,8 @@ function start() {
         status.textContent = "연결됨. 화면을 눌러 조작하고, 끝나면 '다 했어요'를 눌러 주세요.";
         canvas.hidden = false;
         controls.hidden = false;
+      } else if (message.type === "note") {
+        status.textContent = String(message.text || "").slice(0, 120);
       } else if (message.type === "bye") {
         status.textContent = "넘겨받기가 끝났어요.";
         controls.hidden = true;
