@@ -198,8 +198,9 @@ function start() {
       } else if (message.type === "note") {
         status.textContent = String(message.text || "").slice(0, 120);
       } else if (message.type === "bye") {
-        status.textContent = "넘겨받기가 끝났어요.";
+        status.textContent = "넘겨받기가 끝났어요. 아로가 이어서 해요.";
         controls.hidden = true;
+        setTimeout(() => postEvent("web_app_close", {}), 1500);
       }
     }
   };
@@ -228,7 +229,7 @@ function start() {
       });
     };
     ws.onclose = () => {
-      if (problem.hidden) status.textContent = "연결이 끝났어요.";
+      if (problem.hidden && !/아로가 이어서/.test(status.textContent)) status.textContent = "연결이 끝났어요.";
       controls.hidden = true;
     };
   })().catch(() => fail("연결하지 못했어요. 잠시 뒤 아로에게 다시 부탁해 주세요."));
