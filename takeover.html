@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src wss://*.trycloudflare.com; img-src 'none'; form-action 'none'; base-uri 'none'">
+<meta name="referrer" content="no-referrer">
+<title>아로 브라우저</title>
+<link rel="stylesheet" href="takeover.css">
+</head>
+<body>
+<header>
+  <p id="reason">아로의 브라우저</p>
+  <p id="status" role="status">연결하는 중…</p>
+</header>
+<main>
+  <canvas id="screen" width="412" height="780" hidden></canvas>
+  <p id="problem" class="error" hidden></p>
+</main>
+<footer id="controls" hidden>
+  <form id="typing" autocomplete="off" novalidate>
+    <input id="text" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="300" placeholder="누른 칸에 넣을 글자">
+    <button id="send" type="submit">넣기</button>
+  </form>
+  <div class="keys">
+    <button id="backspace" type="button">지우기</button>
+    <button id="enter" type="button">엔터</button>
+    <button id="done" type="button" class="primary">다 했어요</button>
+  </div>
+</footer>
+<script src="takeover.js"></script>
+</body>
+</html>
