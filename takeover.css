@@ -31,7 +31,16 @@ header p { margin: 0; }
 #reason { font-weight: 600; }
 #status { color: var(--muted); font-size: 13px; }
 main { flex: 1; overflow: auto; -webkit-overflow-scrolling: touch; }
-#screen { display: block; width: 100%; height: auto; touch-action: none; background: #ffffff; }
+#screen {
+  display: block;
+  width: 100%;
+  height: auto;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  background: #ffffff;
+}
 footer { padding: 8px 12px 12px; border-top: 1px solid var(--line); }
 #typing { display: flex; gap: 8px; }
 #typing input {
@@ -56,4 +65,5 @@ button {
 }
 button.primary, #typing button { border: 0; background: var(--accent); color: #fff; }
 .keys .primary { flex: 1; }
+.keys button.on { border-color: var(--accent); color: var(--accent); }
 .error { color: var(--error); padding: 16px 12px; }

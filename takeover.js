@@ -13,6 +13,10 @@ const KIND_JSON = 0x10;
 const KIND_FRAME = 0x20;
 const HOST = /^[a-z0-9-]{1,63}\.trycloudflare\.com$/;
 const TAP_SLOP = 10;
+// 끄는 동안 손가락 위치를 보내는 간격(PC는 1초에 입력 20개까지 받는다)
+const MOVE_MS = 60;
+// 손가락을 뗀 소식을 놓쳤다고 보는 시간(이만큼 움직임이 없으면 새 손가락을 따른다)
+const STALE_TOUCH_MS = 8000;
 // 화면을 받지 못한 채 이어서 끊기면 이만큼까지 다시 붙어 본다(PC는 죽은 옛 연결을 15초 안에 알아챈다).
 const MAX_FAILURES = 8;
 // 화면이 다시 보일 때 연결이 살아 있는지 묻고, 이 시간 안에 답이 없으면 새로 붙는다.
@@ -225,7 +229,7 @@ function start() {
       const message = JSON.parse(new TextDecoder().decode(plain.slice(1)));
       if (message.type === "ready") {
         failures = 0;
-        status.textContent = "연결됨. 화면을 눌러 조작하고, 끝나면 '다 했어요'를 눌러 주세요.";
+        status.textContent = "연결됨. 옆으로 밀면 끌고, 위아래로 밀면 굴려요. 위아래로 끌려면 '끌기'를 켜세요. 끝나면 '다 했어요'.";
         canvas.hidden = false;
         controls.hidden = false;
       } else if (message.type === "note") {
@@ -323,28 +327,118 @@ function start() {
 
   connect().catch(() => fail("연결하지 못했어요. 잠시 뒤 아로에게 다시 부탁해 주세요."));
 
-  // 누르기와 밀기: 짧게 누르면 그 자리를 누르고, 위아래로 밀면 화면을 굴린다.
+  // 누르기, 굴리기, 끌기: 짧게 누르면 그 자리를 누르고, 위아래로 밀면 화면을 굴린다. 옆으로 밀거나 '끌기'를 켠 채 밀면
+  // 누른 자리에서 PC 마우스를 누른 채 손가락을 따라 움직인다(보안 확인의 끌어 맞추기 등). 움직임은 MOVE_MS마다 보낸다.
   let touch = null;
+  let dragMode = false;
+  const dragButton = document.getElementById("drag");
+  const point = (event) => {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)),
+      y: Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height)),
+    };
+  };
+  const flushMove = (current) => {
+    clearTimeout(current.timer);
+    current.timer = null;
+    if (!current.pending) return;
+    send({ type: "move", x: current.pending.x, y: current.pending.y });
+    current.pending = null;
+    current.sentAt = Date.now();
+  };
+  const startDrag = (current) => {
+    current.mode = "drag";
+    send({ type: "down", x: current.start.x, y: current.start.y });
+  };
+  // 한 손가락만 따른다. 끄는 중에 두 번째 손가락이 닿아도 무시한다(따라가면 첫 손가락의 뗌을 잃어 PC 마우스가 눌린 채 남는다).
+  // 다만 손가락을 뗀 소식을 놓쳐 STALE_TOUCH_MS 동안 아무 움직임이 없었으면 옛 손가락을 끝내고 새 손가락을 따른다.
   canvas.addEventListener("pointerdown", (event) => {
-    touch = { x: event.clientX, y: event.clientY, time: event.timeStamp };
+    if (touch && Date.now() - touch.seenAt < STALE_TOUCH_MS) {
+      event.preventDefault();
+      return;
+    }
+    if (touch) cancelTouch();
+    const start = point(event);
+    touch = {
+      id: event.pointerId, x: event.clientX, y: event.clientY, start, last: start, mode: "pending", pending: null, sentAt: 0, timer: null,
+      seenAt: Date.now(),
+    };
+    if (canvas.setPointerCapture && event.pointerId !== undefined) {
+      // 손가락이 화면 밖으로 나가도 끌기가 이어지게 한다(안 되면 그냥 둔다).
+      try { canvas.setPointerCapture(event.pointerId); } catch (error) { /* 무시 */ }
+    }
     event.preventDefault();
   });
-  canvas.addEventListener("pointerup", (event) => {
+  canvas.addEventListener("pointermove", (event) => {
+    if (!touch || event.pointerId !== touch.id) return;
+    const current = touch;
+    current.seenAt = Date.now();
+    const dx = event.clientX - current.x;
+    const dy = event.clientY - current.y;
+    if (current.mode === "pending") {
+      if (Math.abs(dx) < TAP_SLOP && Math.abs(dy) < TAP_SLOP) return;
+      if (dragMode || Math.abs(dx) > Math.abs(dy)) startDrag(current);
+      else current.mode = "scroll";
+    }
+    event.preventDefault();
+    if (current.mode !== "drag") return;
+    current.last = point(event);
+    current.pending = current.last;
+    const wait = MOVE_MS - (Date.now() - current.sentAt);
+    if (wait <= 0) flushMove(current);
+    else if (!current.timer) current.timer = setTimeout(() => flushMove(current), wait);
+  });
+  // 손가락이 사라졌을 때(화면이 가려짐 등): 끌던 중이면 마지막으로 본 자리에서 뗀다.
+  const cancelTouch = () => {
     if (!touch) return;
-    const rect = canvas.getBoundingClientRect();
-    const dx = event.clientX - touch.x;
-    const dy = event.clientY - touch.y;
-    if (Math.abs(dx) < TAP_SLOP && Math.abs(dy) < TAP_SLOP) {
-      const x = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
-      const y = Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height));
-      send({ type: "tap", x, y });
-    } else if (Math.abs(dy) >= Math.abs(dx)) {
+    const current = touch;
+    touch = null;
+    clearTimeout(current.timer);
+    if (current.mode === "drag") send({ type: "up", x: current.last.x, y: current.last.y });
+  };
+  const endTouch = (event, cancelled) => {
+    if (!touch || event.pointerId !== touch.id) return;
+    const current = touch;
+    touch = null;
+    clearTimeout(current.timer);
+    event.preventDefault();
+    const dx = event.clientX - current.x;
+    const dy = event.clientY - current.y;
+    const moved = Math.abs(dx) >= TAP_SLOP || Math.abs(dy) >= TAP_SLOP;
+    if (current.mode === "pending" && moved && !cancelled && (dragMode || Math.abs(dx) > Math.abs(dy))) startDrag(current);
+    if (current.mode === "drag") {
+      // 손가락을 뗀 자리에서 마우스를 뗀다. 취소됐으면(다른 앱으로 넘어감 등) 마지막으로 본 자리에서 뗀다.
+      const end = cancelled ? current.last : point(event);
+      send({ type: "up", x: end.x, y: end.y });
+      return;
+    }
+    if (cancelled) return;
+    if (!moved) {
+      const tap = point(event);
+      send({ type: "tap", x: tap.x, y: tap.y });
+      return;
+    }
+    if (current.mode === "scroll" || Math.abs(dy) >= Math.abs(dx)) {
+      const rect = canvas.getBoundingClientRect();
       const cssHeight = Number(canvas.dataset.cssHeight || 780);
       const amount = Math.max(-3000, Math.min(3000, (-dy * cssHeight) / rect.height));
       send({ type: "scroll", dy: amount });
     }
-    touch = null;
-    event.preventDefault();
+  };
+  canvas.addEventListener("pointerup", (event) => endTouch(event, false));
+  canvas.addEventListener("pointercancel", (event) => endTouch(event, true));
+  canvas.addEventListener("lostpointercapture", (event) => endTouch(event, true));
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") cancelTouch();
+  });
+  dragButton.addEventListener("click", () => {
+    dragMode = !dragMode;
+    dragButton.classList.toggle("on", dragMode);
+    dragButton.setAttribute("aria-pressed", String(dragMode));
+    status.textContent = dragMode
+      ? "끌기 켜짐: 어느 방향으로 밀어도 끌어요. 화면을 굴리려면 '끌기'를 다시 누르세요."
+      : "끌기 꺼짐: 위아래로 밀면 굴리고, 옆으로 밀면 끌어요.";
   });
 
   const input = document.getElementById("text");
