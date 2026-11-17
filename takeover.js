@@ -13,6 +13,16 @@ const KIND_JSON = 0x10;
 const KIND_FRAME = 0x20;
 const HOST = /^[a-z0-9-]{1,63}\.trycloudflare\.com$/;
 const TAP_SLOP = 10;
+// 화면을 받지 못한 채 이어서 끊기면 이만큼까지 다시 붙어 본다(PC는 죽은 옛 연결을 15초 안에 알아챈다).
+const MAX_FAILURES = 8;
+// 화면이 다시 보일 때 연결이 살아 있는지 묻고, 이 시간 안에 답이 없으면 새로 붙는다.
+const STALE_MS = 4000;
+// 다시 붙기 전에 기다리는 시간: 실패할 때마다 RETRY_STEP_MS씩 늘리고 RETRY_MAX_MS를 넘기지 않는다.
+const RETRY_STEP_MS = 1000;
+const RETRY_MAX_MS = 5000;
+// PC가 닫을 때 쓰는 코드(takeover.py와 짝). 끝남(4000)과 거절(1008)이면 다시 붙지 않는다.
+const CLOSE_ENDED = 4000;
+const CLOSE_REFUSED = 1008;
 const encoder = new TextEncoder();
 
 function b64urlToBytes(text) {
@@ -147,10 +157,22 @@ function start() {
   const canvas = document.getElementById("screen");
   const controls = document.getElementById("controls");
   const spec = readParams(window.location.search, window.location.hash);
+  // 넘겨받기가 끝났으면(아로가 끝을 알렸거나, '다 했어요'를 눌렀거나, 더 붙을 수 없으면) 다시 붙지 않는다.
+  let ended = false;
+  let retryTimer = null;
+  let staleTimer = null;
+  const finish = (text) => {
+    ended = true;
+    clearTimeout(retryTimer);
+    clearTimeout(staleTimer);
+    status.textContent = text;
+    controls.hidden = true;
+    postEvent("web_app_setup_closing_behavior", { need_confirmation: false });
+  };
   const fail = (text) => {
     problem.textContent = text;
     problem.hidden = false;
-    status.textContent = "연결이 끊겼어요";
+    finish("연결이 끊겼어요");
   };
   if (!spec) {
     fail("이 화면은 Telegram에서 아로가 보낸 [브라우저 열기] 버튼으로 열어 주세요.");
@@ -158,22 +180,32 @@ function start() {
   }
   postEvent("web_app_ready", {});
   postEvent("web_app_expand", {});
+  // 화면을 위아래로 밀어 굴릴 때 Telegram이 미니 앱을 내리지 않게 하고, 실수로 닫으려 하면 묻게 한다(공식 미니 앱 이벤트).
+  postEvent("web_app_setup_swipe_behavior", { allow_vertical_swipe: false });
+  postEvent("web_app_setup_closing_behavior", { need_confirmation: true });
   if (spec.reason) document.getElementById("reason").textContent = spec.reason;
 
   let channel = null;
   let sending = Promise.resolve();
   let receiving = Promise.resolve();
   let ws = null;
+  // 화면을 받지 못한 채 이어서 끊긴 횟수. 화면을 받으면(ready) 0으로 돌아간다.
+  let failures = 0;
   const context = canvas.getContext("2d");
 
   const send = (payload) => {
-    if (!channel || !ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!channel || !ws || ws.readyState !== WebSocket.OPEN) return false;
+    const socket = ws;
+    const current = channel;
     // 보낸 순서와 순서 번호가 어긋나지 않게 하나씩 잠가 보낸다.
-    sending = sending.then(async () => ws.send(await channel.seal(jsonMessage(payload)))).catch(() => {});
+    sending = sending.then(async () => socket.send(await current.seal(jsonMessage(payload)))).catch(() => {});
+    return true;
   };
 
-  const handle = async (data) => {
-    const plain = await channel.open(data);
+  const handle = async (data, current) => {
+    const plain = await current.open(data);
+    // 아로가 보낸 것을 받았으니 연결이 살아 있다.
+    clearTimeout(staleTimer);
     if (plain[0] === KIND_FRAME && plain.length > 5) {
       const view = new DataView(plain.buffer, plain.byteOffset);
       const width = view.getUint16(1);
@@ -192,14 +224,14 @@ function start() {
     if (plain[0] === KIND_JSON) {
       const message = JSON.parse(new TextDecoder().decode(plain.slice(1)));
       if (message.type === "ready") {
+        failures = 0;
         status.textContent = "연결됨. 화면을 눌러 조작하고, 끝나면 '다 했어요'를 눌러 주세요.";
         canvas.hidden = false;
         controls.hidden = false;
       } else if (message.type === "note") {
         status.textContent = String(message.text || "").slice(0, 120);
       } else if (message.type === "bye") {
-        status.textContent = "넘겨받기가 끝났어요. 아로가 이어서 해요.";
-        controls.hidden = true;
+        finish("넘겨받기가 끝났어요. 아로가 이어서 해요.");
         setTimeout(() => postEvent("web_app_close", {}), 1500);
       }
     }
@@ -211,28 +243,85 @@ function start() {
   pin.content = `connect-src wss://${spec.host}`;
   document.head.appendChild(pin);
 
-  (async () => {
+  // 붙을 때마다 새 열쇠를 만들고 처음처럼 인사와 Telegram 본인 확인을 다시 한다(PC가 매번 다시 확인한다).
+  const connect = async () => {
+    retryTimer = null;
+    if (ended) return;
     const keys = await makeKeys(spec.pcPublic);
     const mac = await helloMac(spec.secret, spec.sessionId, keys.phonePublicText);
-    ws = new WebSocket(`wss://${spec.host}/ws`);
-    ws.binaryType = "arraybuffer";
-    ws.onopen = async () => {
-      ws.send(JSON.stringify({ v: 1, s: spec.sessionId, p: keys.phonePublicText, m: bytesToB64url(mac) }));
-      channel = new Channel(keys.aesKey);
-      sending = sending.then(async () => ws.send(await channel.seal(jsonMessage({ type: "auth", initData: spec.initData }))));
+    if (ended) return;
+    const socket = new WebSocket(`wss://${spec.host}/ws`);
+    const current = new Channel(keys.aesKey);
+    socket.binaryType = "arraybuffer";
+    ws = socket;
+    channel = null;
+    sending = Promise.resolve();
+    receiving = Promise.resolve();
+    socket.onopen = () => {
+      if (socket !== ws) return;
+      socket.send(JSON.stringify({ v: 1, s: spec.sessionId, p: keys.phonePublicText, m: bytesToB64url(mac) }));
+      channel = current;
+      sending = sending.then(async () => socket.send(await current.seal(jsonMessage({ type: "auth", initData: spec.initData }))));
     };
-    ws.onmessage = (event) => {
-      if (!(event.data instanceof ArrayBuffer) || !channel) return;
-      receiving = receiving.then(() => handle(event.data)).catch(() => {
-        fail("화면을 받지 못했어요. 창을 닫고 아로에게 다시 부탁해 주세요.");
-        ws.close();
-      });
+    socket.onmessage = (event) => {
+      if (socket !== ws || !(event.data instanceof ArrayBuffer)) return;
+      // 화면을 그리지 못하면 이 연결을 닫고 새로 붙는다(4001: 화면 문제).
+      receiving = receiving.then(() => handle(event.data, current)).catch(() => socket.close(4001, "frame"));
     };
-    ws.onclose = () => {
-      if (problem.hidden && !/아로가 이어서/.test(status.textContent)) status.textContent = "연결이 끝났어요.";
+    socket.onclose = (event) => {
+      if (socket !== ws) return;
+      channel = null;
       controls.hidden = true;
+      if (event.code === CLOSE_ENDED || event.code === CLOSE_REFUSED) {
+        // 아로가 넘겨받기를 끝냈거나 이 연결을 받지 않았다. 앞서 받은 메시지(끝 알림 등)를 다 그린 뒤 마무리한다.
+        const text = event.code === CLOSE_ENDED ? "넘겨받기가 끝났어요." : "연결을 받지 않았어요. 아로에게 다시 부탁해 주세요.";
+        receiving.then(() => { if (!ended) finish(text); });
+        return;
+      }
+      if (!ended) retry();
     };
-  })().catch(() => fail("연결하지 못했어요. 잠시 뒤 아로에게 다시 부탁해 주세요."));
+  };
+
+  // 끊기면 다시 붙는다. 다른 앱에 가 있는 동안(화면이 안 보일 때)은 기다렸다가, 돌아와 화면이 보이면 붙는다.
+  const retry = () => {
+    if (ended || retryTimer) return;
+    failures += 1;
+    if (failures > MAX_FAILURES) {
+      finish("다시 연결하지 못했어요. 아로에게 다시 부탁해 주세요.");
+      return;
+    }
+    status.textContent = "연결이 끊겼어요. 다시 연결하는 중…";
+    if (document.visibilityState !== "visible") return;
+    retryTimer = setTimeout(
+      () => connect().catch(() => fail("연결하지 못했어요. 잠시 뒤 아로에게 다시 부탁해 주세요.")),
+      Math.min(RETRY_STEP_MS * failures, RETRY_MAX_MS),
+    );
+  };
+
+  document.addEventListener("visibilitychange", () => {
+    if (ended || document.visibilityState !== "visible") return;
+    if (!ws || ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+      connect().catch(() => fail("연결하지 못했어요. 잠시 뒤 아로에게 다시 부탁해 주세요."));
+      return;
+    }
+    // 다른 앱에 다녀오면 연결이 말없이 죽어 있을 수 있다. 아로에게 물어보고 답이 없으면 새로 붙는다(4002: 답 없음).
+    if (send({ type: "ping" })) {
+      clearTimeout(staleTimer);
+      const socket = ws;
+      staleTimer = setTimeout(() => {
+        if (socket !== ws || ended) return;
+        ws = null;
+        channel = null;
+        controls.hidden = true;
+        socket.close(4002, "stale");
+        retry();
+      }, STALE_MS);
+    }
+  });
+
+  connect().catch(() => fail("연결하지 못했어요. 잠시 뒤 아로에게 다시 부탁해 주세요."));
 
   // 누르기와 밀기: 짧게 누르면 그 자리를 누르고, 위아래로 밀면 화면을 굴린다.
   let touch = null;
@@ -268,8 +357,11 @@ function start() {
   document.getElementById("backspace").addEventListener("click", () => send({ type: "key", key: "Backspace" }));
   document.getElementById("enter").addEventListener("click", () => send({ type: "key", key: "Enter" }));
   document.getElementById("done").addEventListener("click", () => {
-    send({ type: "done" });
-    status.textContent = "아로에게 넘겼어요. 이어서 진행할게요.";
+    if (!send({ type: "done" })) {
+      status.textContent = "아직 연결되지 않았어요. 다시 연결되면 눌러 주세요.";
+      return;
+    }
+    finish("아로에게 넘겼어요. 이어서 진행할게요.");
     sending.then(() => setTimeout(() => postEvent("web_app_close", {}), 800));
   });
 }
